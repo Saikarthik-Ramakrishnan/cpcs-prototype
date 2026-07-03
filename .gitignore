@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Data & outputs
+*.db
+*.mp4
+*.avi
+*.mov
+*.csv
+*.log
+cpcs_dashboard.html
+annotated.mp4
+bytetrack_cpcs.yaml
+yolov8*.pt
+
+# OS
+.DS_Store
+Thumbs.db
