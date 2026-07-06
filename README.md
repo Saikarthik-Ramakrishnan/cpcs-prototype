@@ -169,6 +169,41 @@ CPU inference (`yolov8n.pt`) already runs on the Orange Pi 5 at ~8–12 fps on 6
 
 ---
 
+
+## On-bus testing (edge board)
+
+Real-bus validation runs in three phases so hardware acceleration and
+real-world footage are never debugged at the same time.
+
+### Phase 1 — record only (no inference)
+`cpcs_recorder.py` is board-agnostic (x86 or ARM, no NPU, no model). It
+captures 2-3 synchronized USB camera feeds to timestamped `.mp4` files plus
+a `frames.csv` per camera for later alignment.
+
+```bash
+pip install opencv-python
+python cpcs_recorder.py --list                       # see available cameras
+python cpcs_recorder.py --cams 0 2 --route "47A" --bus "DL-1PC-4432"
+# Ctrl-C to stop; footage lands in ./recordings/
+```
+
+### Phase 2 — replay through the pipeline (dev machine)
+Copy the recordings off the board and run each camera clip through the
+counting app exactly like the benchmark clip:
+
+```bash
+python cpcs_poc.py --source recordings/<session>/cam0.mp4 --route "47A" --bus "DL-1PC-4432"
+python build_dashboard.py
+```
+
+Hand-count the footage and compare — this is the first real accuracy number.
+
+### Phase 3 — live inference on the board
+Only after Phases 1-2 confirm the footage and counts, push inference onto the
+board's accelerator and run in real time. The acceleration path depends on the
+board: RKNN (Rockchip), OpenVINO (Intel NPU), or HailoRT (Hailo M.2 card).
+
+
 ## One-month roadmap
 
 | Week | Phase | Deliverable |
