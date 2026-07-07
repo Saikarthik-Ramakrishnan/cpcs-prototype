@@ -303,7 +303,7 @@ The test clip used during development (`test_1.mp4`, 402×300, 43 s) is from the
 
 ## Author
 
-**Sai Karthik Ramakrishnan**  
+**Saikarthik Ramakrishnan**  
 First-year ECE, Shiv Nadar University Delhi  
 Intern — SPowerZ Solutions  
 [github.com/Saikarthik-Ramakrishnan](https://github.com/Saikarthik-Ramakrishnan)
