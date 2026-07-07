@@ -1,4 +1,4 @@
-# CPCS — Camera-Based Passenger Counting System
+# CPCS: Camera-Based Passenger Counting System
 
 > **Proof of concept** · first-year ECE intern project · SPowerZ Solutions  
 > Mounts two cameras at a bus doorway, counts boarding and alighting passengers at every stop, and reconciles counts against the on-board ticket machine (POS) to detect revenue leakage — all running locally on edge hardware with no video upload to the cloud.
@@ -141,16 +141,16 @@ The generated `cpcs_dashboard.html` is a self-contained single-file report — n
 
 The v6 `DoorCounter` runs four layers in descending order of evidence quality:
 
-### 1. `live` — direct observation
+### 1. `live`: direct observation
 A track's smoothed centroid crosses the hysteresis band in a single direction. Requires `MIN_AGE = 2` frames of existence and was not previously counted. This is the high-confidence path.
 
-### 2. `coast` — dead reckoning
+### 2. `coast`: dead reckoning
 When a box vanishes (detection void at the line, the dominant failure mode on low-res footage), the track's last measured velocity is extrapolated forward for up to `COAST_MAX_GAP = 12` frames. If the predicted position crosses the band, the crossing fires. Guards: `MIN_AGE ≥ 4`, `|vy| ≥ 2.0 px/frame`. Disable with `--no-coast`.
 
-### 3. `stitch` — fragment reconnection
+### 3. `stitch`: fragment reconnection
 A new track born near where a quiet track *would be now* (velocity × gap) inherits the old track's history. This reconnects a fragmented crossing across a detection void without requiring the missing boxes.
 
-### 4. `fallback` — birth-to-death trajectory
+### 4. `fallback`: birth-to-death trajectory
 A track that was born on one side of the line and retired on the other, without ever being counted, produces a crossing event on cleanup. Last resort.
 
 Every event is written to the DB with its `how` tag. The dashboard shows the breakdown per stop, and a **data confidence** figure (fraction of counts that were `live`) rather than an unverifiable accuracy claim.
@@ -224,7 +224,7 @@ The counting line supports any position and any angle, so a tilted or wide doorw
 Real-bus validation runs in three phases so hardware acceleration and
 real-world footage are never debugged at the same time.
 
-### Phase 1 — record only (no inference)
+### Phase 1: record only (no inference)
 `cpcs_recorder.py` is board-agnostic (x86 or ARM, no NPU, no model). It
 captures 2-3 synchronized USB camera feeds to timestamped `.mp4` files plus
 a `frames.csv` per camera for later alignment.
@@ -236,7 +236,7 @@ python cpcs_recorder.py --cams 0 2 --route "47A" --bus "DL-1PC-4432"
 # Ctrl-C to stop; footage lands in ./recordings/
 ```
 
-### Phase 2 — replay through the pipeline (dev machine)
+### Phase 2: replay through the pipeline (dev machine)
 Copy the recordings off the board and run each camera clip through the
 counting app exactly like the benchmark clip:
 
@@ -247,7 +247,7 @@ python build_dashboard.py
 
 Hand-count the footage and compare — this is the first real accuracy number.
 
-### Phase 3 — live inference on the board
+### Phase 3: live inference on the board
 Only after Phases 1-2 confirm the footage and counts, push inference onto the
 board's accelerator and run in real time. The acceleration path depends on the
 board: RKNN (Rockchip), OpenVINO (Intel NPU), or HailoRT (Hailo M.2 card).
