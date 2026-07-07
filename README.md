@@ -170,6 +170,55 @@ CPU inference (`yolov8n.pt`) already runs on the Orange Pi 5 at ~8–12 fps on 6
 ---
 
 
+
+## Per-bus calibration
+
+The counting line is a virtual tripwire. A fixed line in the middle of the frame is a guess; a calibrated line matches the real doorway geometry of each bus. This is the single biggest accuracy lever for a live deployment, and it is how one codebase scales to a whole fleet: each bus is one config file, no code changes.
+
+### Calibrate a bus
+
+```bash
+python calibrate.py --source recordings/<session>/cam0.mp4 --route "47A" --bus "DL-1PC-4432"
+```
+
+Controls: click two points to place the line, `[` and `]` adjust the dead zone band, `f` flips which side counts as boarding, `space` grabs the next frame, `s` saves to `config.yaml`, `q` quits.
+
+### Run the counter against the calibrated line
+
+```bash
+python cpcs_poc.py --source recordings/<session>/cam0.mp4 --config config.yaml
+```
+
+If no config is given and no `config.yaml` is present, the line falls back to horizontal across the middle of the frame, preserving earlier behaviour.
+
+### Config file
+
+Everything that varies between buses lives in `config.yaml`:
+
+```yaml
+bus:
+  route: "47A"
+  bus_id: "DL-1PC-4432"
+camera:
+  index: 0
+  line: [10, 300, 1900, 340]   # calibrated tripwire in pixels; null for horizontal mid
+  dead_zone: 22
+  flip: false
+detection:
+  model: yolov8n.pt
+  imgsz: 640
+  conf: 0.10
+runtime:
+  fps: 30
+  coast: true
+economics:
+  fare: 15
+  capacity: 45
+```
+
+The counting line supports any position and any angle, so a tilted or wide doorway can be matched exactly. The geometry reduces to the original `y` based math for a horizontal line, so existing results are unchanged.
+
+
 ## On-bus testing (edge board)
 
 Real-bus validation runs in three phases so hardware acceleration and
