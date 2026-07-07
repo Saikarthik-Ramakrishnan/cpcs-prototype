@@ -38,6 +38,9 @@ from datetime import datetime
 import cv2
 from ultralytics import YOLO
 
+from cpcs_geometry import CountingLine
+from cpcs_config import load_config
+
 # ---------------- counting tunables ----------------
 DEAD_ZONE      = 22
 EMA_ALPHA      = 0.5
@@ -52,7 +55,7 @@ STITCH_BASE_D  = 30
 STITCH_PER_FR  = 8
 # --- dead reckoning (coast) ---
 COAST_MAX_GAP  = 12    # propagate a lost track at most this many frames
-COAST_MIN_VY   = 2.0   # px/frame; slower tracks are not coasted
+COAST_MIN_VD   = 2.0   # px/frame across the line; slower tracks are not coasted
 COAST_MIN_AGE  = 4     # only coast tracks with enough observed history
 
 POS_FLAG_TOL   = 1
@@ -78,19 +81,22 @@ def ensure_tracker_config():
     return path
 
 
-def zone_of(y, line_y):
-    if y < line_y - DEAD_ZONE:
-        return "above"
-    if y > line_y + DEAD_ZONE:
-        return "below"
-    return None
-
-
 class DoorCounter:
-    """v6 crossing engine: live + coast + stitch + fallback, all audited."""
+    """v6 crossing engine: live + coast + stitch + fallback, all audited.
 
-    def __init__(self, line_y, enable_coast=True):
-        self.line_y = line_y
+    Geometry is delegated to a CountingLine, so the tripwire can sit at any
+    position and angle (calibrated per bus). Passing a plain int for `line`
+    builds a horizontal line at that y for backward compatibility, in which
+    case the arithmetic is identical to the original y-based counter.
+    """
+
+    def __init__(self, line, enable_coast=True):
+        if isinstance(line, (int, float)):
+            # legacy: horizontal line at y = line, spanning a wide frame
+            self.line = CountingLine(0, int(line), 100000, int(line),
+                                     dead_zone=DEAD_ZONE)
+        else:
+            self.line = line
         self.enable_coast = enable_coast
         self.tracks = {}
         self.frame_idx = 0
@@ -101,14 +107,14 @@ class DoorCounter:
             gap = self.frame_idx - s["last_seen"]
             if gap < STITCH_MIN_GAP or gap > STITCH_MAX_GAP:
                 continue
-            pred_y = s["ema"] + s["vy"] * gap
+            pred_y = s["cy"] + s["vy"] * gap
             pred_x = s["cx"] + s["vx"] * gap
             d_pred = math.hypot(pred_y - cy, pred_x - cx)
-            d_raw = math.hypot(s["ema"] - cy, s["cx"] - cx)
+            d_raw = math.hypot(s["cy"] - cy, s["cx"] - cx)
             allow_raw = STITCH_BASE_D + STITCH_PER_FR * gap
             dir_ok = True
             if abs(s["vy"]) > 0.3:
-                dir_ok = (s["vy"] > 0) == (cy > s["ema"])
+                dir_ok = (s["vy"] > 0) == (cy > s["cy"])
             if (d_pred < STITCH_PRED_D) or (d_raw < allow_raw and dir_ok):
                 score = min(d_pred, d_raw)
                 if score < best_score:
@@ -133,37 +139,40 @@ class DoorCounter:
             cy = (y1 + y2) / 2.0
             cx = (x1 + x2) / 2.0
 
+            d = self.line.signed_distance(cx, cy)
             st = self.tracks.get(tid)
             if st is None:
-                z = zone_of(cy, self.line_y)
+                z = self.line.zone_from_d(d)
                 birth_z, counted, age, stitched, inband = z, False, 0, False, False
                 inh = self._try_stitch(cy, cx)
                 if inh is not None:
                     birth_z, z, counted, age = inh
                     stitched = True
                 elif z is None:
-                    birth_z = "above" if cy < self.line_y else "below"
+                    birth_z = "above" if d < 0 else "below"
                     z = birth_z
                     inband = True
-                st = {"ema": cy, "cx": cx, "raw_y": cy, "vx": 0.0, "vy": 0.0,
+                st = {"d_ema": d, "cx": cx, "cy": cy, "raw_y": cy,
+                      "vx": 0.0, "vy": 0.0,
                       "zone": z, "birth_zone": birth_z, "age": age,
                       "last_seen": self.frame_idx, "counted": counted,
                       "stitched": stitched, "inband": inband}
                 self.tracks[tid] = st
             else:
                 gap = self.frame_idx - st["last_seen"]
-                dy = (cy - st["raw_y"]) / max(gap, 1)
-                dx = (cx - st["cx"]) / max(gap, 1)
-                st["vy"] = 0.5 * dy + 0.5 * st["vy"]
-                st["vx"] = 0.5 * dx + 0.5 * st["vx"]
-                st["ema"] = cy if gap > SNAP_GAP else \
-                    EMA_ALPHA * cy + (1 - EMA_ALPHA) * st["ema"]
+                dyv = (cy - st["cy"]) / max(gap, 1)
+                dxv = (cx - st["cx"]) / max(gap, 1)
+                st["vy"] = 0.5 * dyv + 0.5 * st["vy"]
+                st["vx"] = 0.5 * dxv + 0.5 * st["vx"]
+                st["d_ema"] = d if gap > SNAP_GAP else \
+                    EMA_ALPHA * d + (1 - EMA_ALPHA) * st["d_ema"]
                 st["raw_y"] = cy
                 st["cx"] = cx
+                st["cy"] = cy
                 st["last_seen"] = self.frame_idx
 
             st["age"] += 1
-            nz = zone_of(st["ema"], self.line_y)
+            nz = self.line.zone_from_d(st["d_ema"])
             if nz is not None and st["zone"] is not None and nz != st["zone"] \
                     and st["age"] >= MIN_AGE and not st["counted"]:
                 if st["zone"] == "above" and nz == "below":
@@ -183,10 +192,12 @@ class DoorCounter:
                 gap = self.frame_idx - s["last_seen"]
                 if gap < 1 or gap > COAST_MAX_GAP:
                     continue
-                if s["age"] < COAST_MIN_AGE or abs(s["vy"]) < COAST_MIN_VY:
+                nx, ny = self.line.normal()
+                vd = s["vx"] * nx + s["vy"] * ny   # velocity across the line
+                if s["age"] < COAST_MIN_AGE or abs(vd) < COAST_MIN_VD:
                     continue
-                pred_y = s["ema"] + s["vy"] * gap
-                nz = zone_of(pred_y, self.line_y)
+                pred_d = s["d_ema"] + vd * gap
+                nz = self.line.zone_from_d(pred_d)
                 if nz is not None and s["zone"] is not None and nz != s["zone"]:
                     if s["zone"] == "above" and nz == "below":
                         fired.append(("boarding", "coast", s["stitched"]))
@@ -322,21 +333,36 @@ def main():
     ap.add_argument("--model", default="yolov8n.pt")
     ap.add_argument("--no-coast", action="store_true",
                     help="disable dead-reckoning counts")
+    ap.add_argument("--config", default=None,
+                    help="per-bus config.yaml (calibrated line, model, fps)")
     args = ap.parse_args()
+
+    # config supplies per-bus defaults; explicit CLI flags still win
+    cfg = load_config(args.config)
+    route = args.route if args.route != "Demo Route" else cfg["bus"]["route"]
+    bus = args.bus if args.bus != "BUS-001" else cfg["bus"]["bus_id"]
+    model_name = args.model if args.model != "yolov8n.pt" \
+        else cfg["detection"]["model"]
+    imgsz = args.imgsz if args.imgsz != 640 else cfg["detection"]["imgsz"]
+    enable_coast = (not args.no_coast) and cfg["runtime"].get("coast", True)
+    cam_cfg = cfg["camera"]
 
     source = int(args.source) if args.source.isdigit() else args.source
     tracker_path = ensure_tracker_config()
 
-    model = YOLO(args.model)
+    model = YOLO(model_name)
     cap = cv2.VideoCapture(source)
-    rec = TripRecorder(args.db, args.route, args.bus)
+    rec = TripRecorder(args.db, route, bus)
     counter = None
+    line = None
 
     sim_pos = True
+    calibrated = cam_cfg.get("line") is not None
     print("=" * 52)
     print(f"CPCS PoC capture v2  |  counter v6  |  trip {rec.trip_id}")
-    print(f"model={args.model} imgsz={args.imgsz} "
-          f"coast={'off' if args.no_coast else 'on'}")
+    print(f"model={model_name} imgsz={imgsz} "
+          f"coast={'on' if enable_coast else 'off'}  "
+          f"line={'calibrated' if calibrated else 'horizontal-mid'}")
     print("keys:  n = next stop   p = toggle POS sim   q = quit")
     print("=" * 52)
 
@@ -348,11 +374,17 @@ def main():
         frame_idx += 1
         h, w = frame.shape[:2]
         if counter is None:
-            counter = DoorCounter(line_y=h // 2,
-                                  enable_coast=not args.no_coast)
+            if cam_cfg.get("line") is not None:
+                x1, y1, x2, y2 = cam_cfg["line"]
+                line = CountingLine(x1, y1, x2, y2,
+                                    dead_zone=cam_cfg.get("dead_zone", DEAD_ZONE),
+                                    flip=cam_cfg.get("flip", False))
+            else:
+                line = CountingLine.horizontal_mid(w, h, dead_zone=DEAD_ZONE)
+            counter = DoorCounter(line, enable_coast=enable_coast)
 
         res = model.track(frame, classes=[0], conf=MODEL_CONF,
-                          imgsz=args.imgsz, persist=True,
+                          imgsz=imgsz, persist=True,
                           tracker=tracker_path, verbose=False)
         boxes = res[0].boxes
         xyxy, ids = [], []
@@ -369,8 +401,8 @@ def main():
         for direction, how, _st in counter.update(xyxy, ids):
             rec.record_event(frame_idx, direction, how)
 
-        line_y = h // 2
-        cv2.line(frame, (0, line_y), (w, line_y), (0, 255, 255), 2)
+        cv2.line(frame, (int(line.x1), int(line.y1)),
+                 (int(line.x2), int(line.y2)), (0, 255, 255), 2)
         hud = (f"stop {rec.seq}  IN {rec.stop_boardings}  "
                f"OUT {rec.stop_alightings}  occ {rec.occupancy}  "
                f"POSsim {'on' if sim_pos else 'off'}")
