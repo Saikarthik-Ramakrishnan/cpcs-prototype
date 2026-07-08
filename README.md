@@ -304,8 +304,8 @@ The test clip used during development (`test_1.mp4`, 402×300, 43 s) is from the
 ## Author
 
 **Saikarthik Ramakrishnan**  
-First-year ECE, Shiv Nadar University Delhi  
-Intern — SPowerZ Solutions  
+Second-year ECE, Shiv Nadar University Delhi  
+Intern  
 [github.com/Saikarthik-Ramakrishnan](https://github.com/Saikarthik-Ramakrishnan)
 
 ---
