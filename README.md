@@ -1,6 +1,6 @@
 # CPCS: Camera-Based Passenger Counting System
 
-> **Proof of concept** · first-year ECE intern project · SPowerZ Solutions  
+> **Proof of concept** · first-year ECE intern project  
 > Mounts two cameras at a bus doorway, counts boarding and alighting passengers at every stop, and reconciles counts against the on-board ticket machine (POS) to detect revenue leakage — all running locally on edge hardware with no video upload to the cloud.
 
 ---
