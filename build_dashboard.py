@@ -234,6 +234,7 @@ const DATA = /*__DATA__*/;
 let sortKey="seq", sortDir=1, lang="en", currentTrip=null;
 const $=id=>document.getElementById(id);
 const fmt=n=>n.toLocaleString("en-IN");
+const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 const HOW_COLORS={live:"#2dd4a7",coast:"#c9a227",fallback:"#8d76d8",fallback_eof:"#8d76d8"};
 
 const I18N={
@@ -259,8 +260,8 @@ const I18N={
   col:["#","Stop","In","Out","Occ","POS","D","Conf"],
   tripcol:["Trip","Route","Bus","Stops","In","Flags","Risk",""],
   view:"View",inw:"In",outw:"Out",
-  flag_line:(s,fare)=>`<b>${s.stop_name}</b> - camera counted <b>${s.boardings}</b> boardings, ticket machine sold <b>${s.pos_count}</b>. ${s.discrepancy} unticketed, Rs ${s.discrepancy*fare} at risk.`,
-  flag_under:(s)=>`<b>${s.stop_name}</b> - camera ${s.boardings}, ticket machine ${s.pos_count} (camera under-counted by ${Math.abs(s.discrepancy)}, review).`,
+  flag_line:(s,fare)=>`<b>${esc(s.stop_name)}</b> - camera counted <b>${s.boardings}</b> boardings, ticket machine sold <b>${s.pos_count}</b>. ${s.discrepancy} unticketed, Rs ${s.discrepancy*fare} at risk.`,
+  flag_under:(s)=>`<b>${esc(s.stop_name)}</b> - camera ${s.boardings}, ticket machine ${s.pos_count} (camera under-counted by ${Math.abs(s.discrepancy)}, review).`,
   money:(m)=>`An estimated <b>${m.leak} unticketed passengers</b> this trip represent <b>Rs ${fmt(m.risk)}</b> in potential leakage. Scaled across a 500-bus fleet running multiple trips daily, this is the core ROI case.`},
  hi:{app_title:"यात्री विश्लेषण",tab_overview:"बेड़ा सारांश",tab_trip:"यात्रा विवरण",
   lbl_fare:"किराया Rs",lbl_cap:"क्षमता",lbl_trip:"यात्रा",btn_print:"रिपोर्ट प्रिंट करें",
@@ -284,8 +285,8 @@ const I18N={
   col:["#","स्टॉप","चढ़े","उतरे","सवार","POS","D","Conf"],
   tripcol:["यात्रा","मार्ग","बस","स्टॉप","चढ़े","ध्वज","जोखिम",""],
   view:"देखें",inw:"चढ़े",outw:"उतरे",
-  flag_line:(s,fare)=>`<b>${s.stop_name}</b> - कैमरे ने <b>${s.boardings}</b> यात्री गिने, टिकट मशीन ने <b>${s.pos_count}</b> टिकट बेचे। ${s.discrepancy} बिना टिकट, Rs ${s.discrepancy*fare} जोखिम में।`,
-  flag_under:(s)=>`<b>${s.stop_name}</b> - कैमरा ${s.boardings}, टिकट मशीन ${s.pos_count} (कैमरे ने ${Math.abs(s.discrepancy)} कम गिने, जाँच करें)।`,
+  flag_line:(s,fare)=>`<b>${esc(s.stop_name)}</b> - कैमरे ने <b>${s.boardings}</b> यात्री गिने, टिकट मशीन ने <b>${s.pos_count}</b> टिकट बेचे। ${s.discrepancy} बिना टिकट, Rs ${s.discrepancy*fare} जोखिम में।`,
+  flag_under:(s)=>`<b>${esc(s.stop_name)}</b> - कैमरा ${s.boardings}, टिकट मशीन ${s.pos_count} (कैमरे ने ${Math.abs(s.discrepancy)} कम गिने, जाँच करें)।`,
   money:(m)=>`इस यात्रा में अनुमानित <b>${m.leak} बिना टिकट यात्री</b> = <b>Rs ${fmt(m.risk)}</b> की संभावित हानि। 500 बसों के बेड़े पर यह मुख्य ROI आधार है।`}
 };
 const T=()=>I18N[lang];
@@ -477,7 +478,7 @@ function renderTable(s,perStop){
     const cf=x._conf===null?"\u2014":`<span class="${x._conf>=90?'conf-hi':'conf-mid'}">${x._conf}%</span>`;
     const flag=x.flagged?'<span class="tag">&#9873;</span> ':'';
     return `<tr class="${x.flagged?'flagged':''}"><td>${x.seq}</td>
-      <td>${flag}${x.stop_name}</td><td>${x.boardings}</td><td>${x.alightings}</td>
+      <td>${flag}${esc(x.stop_name)}</td><td>${x.boardings}</td><td>${x.alightings}</td>
       <td>${x.occupancy_after}</td><td>${pos}</td><td>${d}</td><td>${cf}</td></tr>`;
   }).join("");
 }
