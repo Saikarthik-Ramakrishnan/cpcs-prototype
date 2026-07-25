@@ -25,14 +25,24 @@ Fast mode (weaker but quicker):
 Disable dead reckoning:
     python cpcs_poc.py --source test_1.mp4 --no-coast
 
+Score a run against ground truth (no window, whole clip, writes events.csv):
+    python cpcs_poc.py --source test_1.mp4 --model yolov8s.pt --imgsz 960 \
+                       --headless --db /tmp/eval.db --events-csv /tmp/ev.csv
+    python eval/validate.py --events /tmp/ev.csv \
+                            --labels eval/labels/test_1.json
+
 Then:  python build_dashboard.py   ->  open cpcs_dashboard.html
+
+Measured accuracy on test_1.mp4 is in eval/RESULTS.md.
 """
 
 import argparse
+import csv
 import math
 import os
 import random
 import sqlite3
+from dataclasses import dataclass, fields
 from datetime import datetime
 
 import cv2
@@ -42,6 +52,9 @@ from cpcs_geometry import CountingLine
 from cpcs_config import load_config
 
 # ---------------- counting tunables ----------------
+# These module constants are the shipped defaults. They are mirrored into
+# CounterParams below, which is what DoorCounter actually reads, so a sweep
+# (eval/tune.py) can vary them without editing this file.
 DEAD_ZONE      = 22
 EMA_ALPHA      = 0.5
 MIN_AGE        = 2
@@ -53,12 +66,42 @@ STITCH_MAX_GAP = 25
 STITCH_PRED_D  = 60
 STITCH_BASE_D  = 30
 STITCH_PER_FR  = 8
+STITCH_MAX_D   = 90    # hard cap on the raw-distance gate; without it the
+                       # per-frame allowance grows unbounded and a long gap
+                       # will happily stitch two people at opposite ends
+                       # of the frame together
 # --- dead reckoning (coast) ---
 COAST_MAX_GAP  = 12    # propagate a lost track at most this many frames
 COAST_MIN_VD   = 2.0   # px/frame across the line; slower tracks are not coasted
 COAST_MIN_AGE  = 4     # only coast tracks with enough observed history
 
 POS_FLAG_TOL   = 1
+
+
+@dataclass
+class CounterParams:
+    """Every knob DoorCounter reads. Defaults are the module constants above."""
+    ema_alpha:      float = EMA_ALPHA
+    min_age:        int   = MIN_AGE
+    stale:          int   = STALE
+    snap_gap:       int   = SNAP_GAP
+    stitch_min_gap: int   = STITCH_MIN_GAP
+    stitch_max_gap: int   = STITCH_MAX_GAP
+    stitch_pred_d:  float = STITCH_PRED_D
+    stitch_base_d:  float = STITCH_BASE_D
+    stitch_per_fr:  float = STITCH_PER_FR
+    stitch_max_d:   float = STITCH_MAX_D
+    stitch_counted: bool  = False   # may an already-counted track be a donor?
+    coast_max_gap:  int   = COAST_MAX_GAP
+    coast_min_vd:   float = COAST_MIN_VD
+    coast_min_age:  int   = COAST_MIN_AGE
+
+    def replace(self, **kw):
+        known = {f.name for f in fields(self)}
+        bad = set(kw) - known
+        if bad:
+            raise ValueError(f"unknown counter params: {sorted(bad)}")
+        return CounterParams(**{**self.__dict__, **kw})
 
 TRACKER_YAML = "bytetrack_cpcs.yaml"
 TRACKER_CONFIG = """\
@@ -90,7 +133,7 @@ class DoorCounter:
     case the arithmetic is identical to the original y-based counter.
     """
 
-    def __init__(self, line, enable_coast=True):
+    def __init__(self, line, enable_coast=True, params=None):
         if isinstance(line, (int, float)):
             # legacy: horizontal line at y = line, spanning a wide frame
             self.line = CountingLine(0, int(line), 100000, int(line),
@@ -98,24 +141,33 @@ class DoorCounter:
         else:
             self.line = line
         self.enable_coast = enable_coast
+        self.p = params or CounterParams()
         self.tracks = {}
         self.frame_idx = 0
 
     def _try_stitch(self, cy, cx):
+        p = self.p
         best, best_score = None, float("inf")
         for otid, s in self.tracks.items():
             gap = self.frame_idx - s["last_seen"]
-            if gap < STITCH_MIN_GAP or gap > STITCH_MAX_GAP:
+            if gap < p.stitch_min_gap or gap > p.stitch_max_gap:
+                continue
+            # A track that has already fired its event is spent. Adopting it
+            # can never recover a count, but it CAN destroy one: the new track
+            # inherits counted=True and is muted for life, so a genuine
+            # crossing by a different person goes unrecorded.
+            if s["counted"] and not p.stitch_counted:
                 continue
             pred_y = s["cy"] + s["vy"] * gap
             pred_x = s["cx"] + s["vx"] * gap
             d_pred = math.hypot(pred_y - cy, pred_x - cx)
             d_raw = math.hypot(s["cy"] - cy, s["cx"] - cx)
-            allow_raw = STITCH_BASE_D + STITCH_PER_FR * gap
+            allow_raw = min(p.stitch_base_d + p.stitch_per_fr * gap,
+                            p.stitch_max_d)
             dir_ok = True
             if abs(s["vy"]) > 0.3:
                 dir_ok = (s["vy"] > 0) == (cy > s["cy"])
-            if (d_pred < STITCH_PRED_D) or (d_raw < allow_raw and dir_ok):
+            if (d_pred < p.stitch_pred_d) or (d_raw < allow_raw and dir_ok):
                 score = min(d_pred, d_raw)
                 if score < best_score:
                     best_score, best = score, otid
@@ -128,6 +180,7 @@ class DoorCounter:
 
     def update(self, boxes_xyxy, ids):
         """Returns list of (direction, how, stitched) events this frame."""
+        p = self.p
         self.frame_idx = self.frame_idx + 1
         fired = []
         seen_now = set()
@@ -164,8 +217,8 @@ class DoorCounter:
                 dxv = (cx - st["cx"]) / max(gap, 1)
                 st["vy"] = 0.5 * dyv + 0.5 * st["vy"]
                 st["vx"] = 0.5 * dxv + 0.5 * st["vx"]
-                st["d_ema"] = d if gap > SNAP_GAP else \
-                    EMA_ALPHA * d + (1 - EMA_ALPHA) * st["d_ema"]
+                st["d_ema"] = d if gap > p.snap_gap else \
+                    p.ema_alpha * d + (1 - p.ema_alpha) * st["d_ema"]
                 st["raw_y"] = cy
                 st["cx"] = cx
                 st["cy"] = cy
@@ -174,7 +227,7 @@ class DoorCounter:
             st["age"] += 1
             nz = self.line.zone_from_d(st["d_ema"])
             if nz is not None and st["zone"] is not None and nz != st["zone"] \
-                    and st["age"] >= MIN_AGE and not st["counted"]:
+                    and st["age"] >= p.min_age and not st["counted"]:
                 if st["zone"] == "above" and nz == "below":
                     fired.append(("boarding", "live", st["stitched"]))
                     st["counted"] = True
@@ -190,11 +243,11 @@ class DoorCounter:
                 if tid in seen_now or s["counted"]:
                     continue
                 gap = self.frame_idx - s["last_seen"]
-                if gap < 1 or gap > COAST_MAX_GAP:
+                if gap < 1 or gap > p.coast_max_gap:
                     continue
                 nx, ny = self.line.normal()
                 vd = s["vx"] * nx + s["vy"] * ny   # velocity across the line
-                if s["age"] < COAST_MIN_AGE or abs(vd) < COAST_MIN_VD:
+                if s["age"] < p.coast_min_age or abs(vd) < p.coast_min_vd:
                     continue
                 pred_d = s["d_ema"] + vd * gap
                 nz = self.line.zone_from_d(pred_d)
@@ -210,7 +263,7 @@ class DoorCounter:
 
         # --- retire stale tracks with birth-to-death fallback ---
         stale = [t for t, s in self.tracks.items()
-                 if self.frame_idx - s["last_seen"] > STALE]
+                 if self.frame_idx - s["last_seen"] > p.stale]
         for t in stale:
             s = self.tracks[t]
             if not s["counted"] and s["birth_zone"] and s["zone"] \
@@ -315,6 +368,27 @@ class TripRecorder:
         self.db.close()
 
 
+def pick_device(explicit=None):
+    """Fastest device available, unless the caller names one.
+
+    Ultralytics does not auto-select Apple Silicon's GPU, so the PoC was
+    running on CPU at ~5 fps where MPS gives ~30. On the Orange Pi 5 target
+    neither branch matches and this correctly falls through to CPU.
+    """
+    if explicit:
+        return explicit
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "0"
+        if getattr(torch.backends, "mps", None) and \
+                torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def simulate_pos(camera_boardings):
     if camera_boardings == 0:
         return 0
@@ -335,6 +409,16 @@ def main():
                     help="disable dead-reckoning counts")
     ap.add_argument("--config", default=None,
                     help="per-bus config.yaml (calibrated line, model, fps)")
+    ap.add_argument("--device", default=None,
+                    help="torch device (cpu / mps / 0). Default: pick the "
+                         "fastest available. Ultralytics otherwise falls back "
+                         "to CPU, which is ~6x slower on this Mac.")
+    ap.add_argument("--headless", action="store_true",
+                    help="no window and no key handling; process the whole "
+                         "source and exit (for scoring and for CI)")
+    ap.add_argument("--events-csv", default=None,
+                    help="also write every event here, in the format "
+                         "eval/validate.py reads")
     args = ap.parse_args()
 
     # config supplies per-bus defaults; explicit CLI flags still win
@@ -349,10 +433,14 @@ def main():
 
     source = int(args.source) if args.source.isdigit() else args.source
     tracker_path = ensure_tracker_config()
+    device = pick_device(args.device)
 
     model = YOLO(model_name)
     cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        raise SystemExit(f"could not open source: {args.source}")
     rec = TripRecorder(args.db, route, bus)
+    csv_rows = []
     counter = None
     line = None
 
@@ -360,7 +448,7 @@ def main():
     calibrated = cam_cfg.get("line") is not None
     print("=" * 52)
     print(f"CPCS PoC capture v2  |  counter v6  |  trip {rec.trip_id}")
-    print(f"model={model_name} imgsz={imgsz} "
+    print(f"model={model_name} imgsz={imgsz} device={device} "
           f"coast={'on' if enable_coast else 'off'}  "
           f"line={'calibrated' if calibrated else 'horizontal-mid'}")
     print("keys:  n = next stop   p = toggle POS sim   q = quit")
@@ -384,22 +472,28 @@ def main():
             counter = DoorCounter(line, enable_coast=enable_coast)
 
         res = model.track(frame, classes=[0], conf=MODEL_CONF,
-                          imgsz=imgsz, persist=True,
+                          imgsz=imgsz, persist=True, device=device,
                           tracker=tracker_path, verbose=False)
         boxes = res[0].boxes
         xyxy, ids = [], []
         if boxes.id is not None:
             xyxy = boxes.xyxy.tolist()
             ids = boxes.id.tolist()
-            for b, tid in zip(xyxy, ids):
-                x1, y1, x2, y2 = b
-                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)),
-                              (0, 255, 0), 2)
-                cv2.putText(frame, f"id {int(tid)}", (int(x1), int(y1) - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            if not args.headless:
+                for b, tid in zip(xyxy, ids):
+                    x1, y1, x2, y2 = b
+                    cv2.rectangle(frame, (int(x1), int(y1)),
+                                  (int(x2), int(y2)), (0, 255, 0), 2)
+                    cv2.putText(frame, f"id {int(tid)}",
+                                (int(x1), int(y1) - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        for direction, how, _st in counter.update(xyxy, ids):
+        for direction, how, stitched in counter.update(xyxy, ids):
             rec.record_event(frame_idx, direction, how)
+            csv_rows.append([frame_idx, direction, how, stitched])
+
+        if args.headless:
+            continue
 
         cv2.line(frame, (int(line.x1), int(line.y1)),
                  (int(line.x2), int(line.y2)), (0, 255, 255), 2)
@@ -423,17 +517,30 @@ def main():
                   f"pos {row[4]} d {row[5]}{flag}")
 
     if counter is not None:
-        for direction, how, _ in counter.flush():
+        for direction, how, stitched in counter.flush():
             rec.record_event(frame_idx, direction, how)
+            csv_rows.append([frame_idx, direction, how, stitched])
     if rec.stop_boardings or rec.stop_alightings:
         pos = simulate_pos(rec.stop_boardings) if sim_pos else None
         rec.commit_stop(pos_count=pos)
+    total_in = rec.db.execute(
+        "SELECT COALESCE(SUM(boardings),0), COALESCE(SUM(alightings),0) "
+        "FROM stops WHERE trip_id=?", (rec.trip_id,)).fetchone()
     rec.end_trip()
 
+    if args.events_csv:
+        with open(args.events_csv, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["frame", "direction", "how", "stitched"])
+            w.writerows(csv_rows)
+        print(f"{len(csv_rows)} events -> {args.events_csv}")
+
     cap.release()
-    cv2.destroyAllWindows()
+    if not args.headless:
+        cv2.destroyAllWindows()
     print("=" * 52)
-    print(f"trip {rec.trip_id} written to {args.db}")
+    print(f"trip {rec.trip_id}: {total_in[0]} in / {total_in[1]} out "
+          f"over {frame_idx} frames -> {args.db}")
     print("build the report:  python build_dashboard.py")
     print("=" * 52)
 

@@ -15,6 +15,83 @@ spec = importlib.util.spec_from_file_location("cpcs_poc", _POC)
 poc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(poc)
 DoorCounter = poc.DoorCounter
+CounterParams = poc.CounterParams
+
+
+def feed_pts(dc, frames):
+    """frames: list of [(tid, x, y), ...] — lets a scenario place tracks apart
+    in x, which the y-only feeders cannot express."""
+    fired = []
+    for fr in frames:
+        boxes = [[x - 10, y - 20, x + 10, y + 20] for (_, x, y) in fr]
+        ids = [t for (t, _, _) in fr]
+        fired += dc.update(boxes, ids)
+    fired += dc.flush()
+    return [(d, h) for (d, h, _) in fired]
+
+
+def spent_donor_then_new_person():
+    """The frame-750 failure, reduced.
+
+    A person crosses and is counted, then stands still long enough for their
+    velocity to decay to ~0, then their detection drops. Eighteen frames later
+    an unrelated person appears at the far end of the frame. Because the raw
+    distance gate grows 8 px/frame with no ceiling, 18 frames buys a 174 px
+    allowance, which is most of a 402 px frame -- so the newcomer is stitched
+    onto the spent track, inherits counted=True, and their genuine crossing is
+    never recorded. Correct behaviour is two boardings.
+    """
+    seq = [[(1, 200, 100)], [(1, 200, 120)], [(1, 200, 140)],
+           [(1, 200, 160)], [(1, 200, 180)], [(1, 200, 200)]]
+    seq += [[(1, 200, 200)] for _ in range(8)]      # stand still, vy -> ~0
+    seq += [[] for _ in range(17)]                  # detection drops
+    seq += [[(2, 200, 30)], [(2, 200, 60)], [(2, 200, 90)], [(2, 200, 120)],
+            [(2, 200, 150)], [(2, 200, 180)], [(2, 200, 210)]]
+    return seq
+
+
+def test_spent_track_is_not_adopted_and_second_person_is_counted():
+    got = feed_pts(DoorCounter(hline()), spent_donor_then_new_person())
+    assert [d for d, _ in got] == ["boarding", "boarding"], got
+
+
+def test_counted_guard_alone_prevents_the_theft():
+    """Pin the counted-donor rule on its own: disable the distance ceiling so
+    it cannot be what rescues the count."""
+    p = CounterParams().replace(stitch_max_d=1e9)
+    got = feed_pts(DoorCounter(hline(), params=p),
+                   spent_donor_then_new_person())
+    assert [d for d, _ in got] == ["boarding", "boarding"], got
+
+
+def test_distance_ceiling_alone_prevents_the_theft():
+    """Pin the distance ceiling on its own: allow counted tracks as donors so
+    the counted rule cannot be what rescues the count."""
+    p = CounterParams().replace(stitch_counted=True)
+    got = feed_pts(DoorCounter(hline(), params=p),
+                   spent_donor_then_new_person())
+    assert [d for d, _ in got] == ["boarding", "boarding"], got
+
+
+def test_scenario_actually_failed_before_the_fix():
+    """Guard against the regression test quietly becoming vacuous: with both
+    rules disabled the original bug must still reproduce (one count lost)."""
+    p = CounterParams().replace(stitch_counted=True, stitch_max_d=1e9)
+    got = feed_pts(DoorCounter(hline(), params=p),
+                   spent_donor_then_new_person())
+    assert [d for d, _ in got] == ["boarding"], got
+
+
+def test_legitimate_fragment_of_uncounted_person_still_stitches():
+    """The fix must not break stitching, which exists to rejoin an uncounted
+    person's fragmented track."""
+    seq = [[(1, 200, 260)], [(1, 200, 250)], [(1, 200, 240)],
+           [(1, 200, 230)], [(1, 200, 220)]]
+    seq += [[] for _ in range(3)]
+    seq += [[(2, 200, 182)], [(2, 200, 172)], [(2, 200, 162)],
+            [(2, 200, 120)], [(2, 200, 110)]]
+    got = feed_pts(DoorCounter(hline()), seq)
+    assert len(got) == 1 and got[0][0] == "alighting", got
 
 
 def feed_y(dc, frames):
