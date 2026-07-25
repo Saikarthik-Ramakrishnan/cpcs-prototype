@@ -129,13 +129,6 @@ The generated `cpcs_dashboard.html` is a self-contained single-file report — n
 - Timeline scatter of every individual crossing event, colored by method
 - Sortable per-stop table with per-stop data confidence percentage
 - Plain-language revenue reconciliation with rupee-at-risk figures
-
-**Controls**
-- Live fare (₹) and capacity inputs — all figures recompute instantly
-- `हिंदी` button — full bilingual toggle (English / Hindi)
-- `Print report` — switches to light theme, prints both tabs, restores your theme
-- Dark / light theme toggle
-
 ---
 
 ## Counting engine: accuracy layers
